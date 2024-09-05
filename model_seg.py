@@ -1,4 +1,4 @@
-
+# For the complete code, please contact mz120220959@stu.yzu.edu.cn
 import numpy as np
 import pytest
 import torch.nn as nn
@@ -54,8 +54,6 @@ class StarTransformer(nn.Module):
         self.star_att = nn.ModuleList(
             [_MSA2(hidden_size, nhead=num_head, head_dim=head_dim, dropout=0.05)
              for _ in range(self.iters)])
-
-
 
     def forward(self, data: torch.FloatTensor, relay: torch.FloatTensor, mask: torch.ByteTensor):
         r"""
@@ -303,29 +301,17 @@ class AdaptiveConv(nn.Module):
         x = x.max(dim=-1, keepdim=False)[0] # (bs, out_channels, num_points)
         B, O, N = x.size()
         x2= x_relay.view(B,O,N)
-        combined_x = torch.cat((x, x2), dim=3)  # 沿着第4维度拼接
+        combined_x = torch.cat((x, x2), dim=3)  
 
-        # 将拼接后的数据乘以门控的转换矩阵，并经过softmax函数得到门控权重
         combined_x_reshaped = combined_x.view(batch_size * num_points * self.k, -1)
         gated_output = torch.matmul(combined_x_reshaped, self.gated_transform)
         gated_output = gated_output.view(batch_size, num_points, self.k, -1)
-
-        # 通过softmax函数获取门控权重
         gated_weights = nn.functional.softmax(gated_output, dim=-1)
-
         norm_x1 = torch.norm(x1, p=2, dim=1, keepdim=True)
         x_h =  x1 /torch.tanh(norm_x1)
         x1 =x_h /norm_x1
         gate = x * gated_weights + x1 * (1 - gated_weights)
-
         return gate
-
-
-
-
-
-
-
 
 class GraphConv(nn.Module):
     def __init__(self, in_channels, out_channels, k):
@@ -425,117 +411,5 @@ class Transform_Net(nn.Module):
         return x
 
 
-class Net(nn.Module):
-    def __init__(self, args, class_num, cat_num, use_stn=True):
-        super(Net, self).__init__()
-        self.args = args
-        self.k = args.k
-        self.class_num = class_num
-        self.cat_num = cat_num
-        self.use_stn = use_stn
-
-        # architecture
-        self.in_channels = 6
-        self.forward_para = [['adapt', 64, 64], 
-                            ['adapt', 64, 64], 
-                            ['pool', 4], 
-                            ['adapt', 128, 64],
-                            ['pool', 4], 
-                            ['adapt', 256, 64], 
-                            ['pool', 2], 
-                            ['graph', 512],
-                            ['conv1d', 1024]]
-        self.agg_channels = 0
-
-        # layers
-        self.forward_layers = nn.ModuleList()
-        feat_channels = 12
-        for i, para in enumerate(self.forward_para):
-            if para[0] == 'pool':
-                self.forward_layers.append(gp.Pooling_fps(pooling_rate=para[1], neighbor_num=self.k))
-            else:
-                self.forward_layers.append(ConvLayer(para, self.k, self.in_channels, feat_channels))
-                self.agg_channels += para[1]
-                feat_channels = para[1]*2
-        
-        self.agg_channels += 64
-
-        self.conv_onehot = nn.Sequential(nn.Conv1d(cat_num, 64, kernel_size=1, bias=False),
-                                   nn.BatchNorm1d(64),
-                                   nn.LeakyReLU(negative_slope=0.2))
-
-        self.conv1d = nn.Sequential(
-            nn.Conv1d(self.agg_channels, 512, kernel_size=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(p=args.dropout),
-            nn.Conv1d(512, 256, kernel_size=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(p=args.dropout),
-            nn.Conv1d(256, class_num, kernel_size=1),
-            )
-
-        if self.use_stn:
-            self.stn = Transform_Net(in_channels=12, out_channels=3)
-
-
-    def forward(self, x, onehot):
-        # x: (bs, num_points, 6), onehot: (bs, cat_num)
-        x = x.permute(0, 2, 1).contiguous() # (bs, 6, num_points)
-        batch_size = x.size(0)
-        num_points = x.size(2)
-
-        if self.use_stn:
-            x0, _ = get_graph_feature(x, k=self.k)
-            t = self.stn(x0)
-            p1 = torch.bmm(x[:,0:3,:].transpose(2, 1), t) # (bs, num_points, 3)
-            p2 = torch.bmm(x[:,3:6,:].transpose(2, 1), t)
-            x = torch.cat((p1, p2), dim=2).transpose(2, 1).contiguous() # (bs, 6, num_points)
-        points = x[:,0:3,:] # (bs, 3, num_points)
-        
-        # forward
-        feat_forward = []
-        points_forward = [points]
-        _, idx = get_graph_feature(points, k=self.k)
-        for i, block in enumerate(self.forward_layers):
-            if self.forward_para[i][0] == 'pool':
-                points, x = block(points, x, idx)
-                points_forward.append(points)
-                _, idx = get_graph_feature(points, k=self.k)
-            elif self.forward_para[i][0] == 'conv1d':
-                x = block(points, x, idx)
-                x = x.unsqueeze(2).repeat(1, 1, num_points)
-                feat_forward.append(x)
-            else:
-                x = block(points, x, idx)
-                feat_forward.append(x)
-
-        # onehot
-        onehot = onehot.unsqueeze(2)
-        onehot_expand = self.conv_onehot(onehot)
-        onehot_expand = onehot_expand.repeat(1, 1, num_points)
-
-        # aggregating features from all layers
-        x_agg = []
-        points0 = points_forward.pop(0)
-        points = None
-        for i, para in enumerate(self.forward_para):
-            if para[0] == 'pool':
-                points = points_forward.pop(0)
-            else:
-                x = feat_forward.pop(0)
-                if x.size(2) == points0.size(2):
-                    x_agg.append(x)
-                    continue
-                idx = gp.get_nearest_index(points0, points)
-                x_upsample = gp.indexing_neighbor(x, idx).squeeze(3)
-                x_agg.append(x_upsample)
-        x = torch.cat(x_agg, dim=1)
-        x = torch.cat((x, onehot_expand), dim=1)
-        x = self.conv1d(x)
-        x = x.permute(0, 2, 1).contiguous() # (bs, num_points, class_num)
-
-        return x
 
 
